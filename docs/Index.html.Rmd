@@ -1,0 +1,450 @@
+---
+title: "<b>NovaBank Predictive Retention Framework</b></font><br>" 
+subtitle: "<font color = blue><b>Analytics Methods and Frameworks</b></font>" 
+date: "08-03-2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+```
+
+# **<span style="color: #2C6D26;">Part One: Problem Framing & Scope</span> ** 
+
+## 1.1 Brief Problem
+
+NovaBank runs phone campaigns to sell term deposits. The issue? Despite significant outreach effort, the **subscription rate is under 12%**, which implies that **Over 88% of calls lead to nothing** -- wasted agent time and budget.
+
+## 1.2 Analytics Problem Translation
+
+| Business Question | Analytics Formulation |
+|---|---|
+| Who is most likely to subscribe? | Binary classification: predict `y = yes/no` |
+| How confident should we be? | Calibrated probability scores per customer |
+| Who should we call first? | Rank customers by predicted probability; contact top N% |
+| What is the cost of errors? | FP = wasted call cost; FN = lost subscription revenue |
+
+## 1.3 Success Measures
+
+We select **two primary metrics**:
+
+1. **Precision@Top20%** — Of the customers we flag as high-priority, what fraction actually subscribes? This directly measures targeting efficiency.  
+2. **AUC-ROC** — Overall discrimination ability of the model across all thresholds.
+
+Secondary: F1 score at the operational threshold.
+
+## 1.4 Project Goal
+
+>The goal of this project is simple: **predict which customers are likely to subscribe before we call them**, so agents focus only on the best leads.
+
+---
+
+# **<span style="color: #2C6D26;">Part 2: Data Preparation</span> ** 
+
+## 2.1 Load and View Data
+
+We use the UCI Bank Marketing dataset -- 45,211 customer records with 17 variables.
+
+```{r load-data}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(pROC)
+library(scales)
+
+data <- read.csv("bank_marketing.csv", stringsAsFactors = FALSE)
+
+glimpse(data)
+
+
+# How many subscribed?
+data %>%
+  count(y) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  rename(Subscribed = y, Count = n, `Percent (%)` = pct)
+```
+
+> **From this table:** "No" = did not subscribe, "Yes" = subscribed. Only 1 in 10 customers said yes -- which is why a smarter targeting strategy is a must needed factor for the business.
+
+Key variables we use:
+
+| Variable   | What it means                              |
+|------------|--------------------------------------------|
+| `age`      | Customer age                               |
+| `job`      | Type of work                               |
+| `balance`  | Bank account balance                       |
+| `campaign` | How many times called this campaign        |
+| `poutcome` | Did they subscribe in a previous campaign? |
+| `y`        | **Target:** Did they subscribe? (Yes/No)   |
+
+> We will drop `duration` (call length) from the model, we can't know this *before* making the call to avoid bias.
+
+
+## 2.2 Data Cleaning
+
+We clean the data and get it ready for modelling. The main steps are: converting text labels into categories the model can understand, and dropping the `duration` variable to avoid any unfair advantage.
+
+```{r clean-data}
+data_nova <- data %>%
+  mutate(y = factor(ifelse(y == "yes", "Yes", "No"), levels = c("No", "Yes"))) %>%
+  mutate(across(c(default, housing, loan, contact, poutcome,
+                  job, marital, education, month), factor)) %>%
+  select(-duration) %>%
+  mutate(previously_contacted = factor(ifelse(pdays == -1, "No", "Yes"))) %>%
+  select(-pdays)
+```
+
+
+## 2.3 Data Exploration
+
+Before building any model, it helps to look at the data and spot patterns. The charts below show which types of customers are more likely to subscribe.
+
+### Who is most likely to subscribe?
+
+```{r eda-job, fig.height=5}
+data_nova %>%
+  group_by(job) %>%
+  summarise(rate = mean(y == "Yes"), n = n()) %>%
+  arrange(rate) %>%
+  mutate(job = fct_reorder(job, rate)) %>%
+  ggplot(aes(x = rate, y = job, fill = rate)) +
+  geom_col() +
+  geom_text(aes(label = percent(rate, accuracy = 0.1)), hjust = -0.1, size = 3) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.15))) +
+  scale_fill_gradient(low = "#CADCFC", high = "#1E2761") +
+  labs(title = "Subscription Rate by Job Type",
+       subtitle = "Darker bars = higher subscription rate",
+       x = "% of customers in this job who subscribed", y = NULL) +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+
+> The chart indicates that **Retired people and students** convert at nearly double the average rate. **Entrepreneurs** and **housemaids**  are the least likely to subscribe. **Agents should prioritise retirees and students when capacity is limited.**
+
+
+### Subscription Rate by Previous Campaign Outcome
+
+```{r eda-poutcome}
+data_nova %>%
+  group_by(poutcome) %>%
+  summarise(rate = mean(y == "Yes"), n = n()) %>%
+  ggplot(aes(x = poutcome, y = rate, fill = poutcome)) +
+  geom_col() +
+  geom_text(aes(label = percent(rate, accuracy = 0.1)), vjust = -0.5) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("unknown" = "#CADCFC", "other" = "#7FA8F5",
+                               "failure" = "#4472C4", "success" = "#1E2761")) +
+  labs(title = "Subscription Rate by Previous Campaign Outcome",
+       subtitle = "Did this customer subscribe in a past campaign?",
+       x = "Previous Campaign Result", y = "% who subscribed this time") +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+
+> Customers who said "yes" in a previous campaign ("success") convert at over 60% — six times the average. This is the single strongest signal we have. **If a customer subscribed before, always call them.**
+
+**Recommendation:** Retired customers and those who subscribed in a previous campaign are the most promising leads.
+
+### Subscription Rate by Number of Campaign Contacts
+
+```{r eda-campaign, fig.height=4}
+# Campaign contacts vs outcome
+data_nova %>%
+  mutate(campaign_grp = cut(campaign, breaks = c(0,1,2,3,5,Inf),
+                             labels = c("1","2","3","4-5","6+"))) %>%
+  group_by(campaign_grp) %>%
+  summarise(rate = mean(y == "Yes"), n = n()) %>%
+  ggplot(aes(x = campaign_grp, y = rate, fill = rate)) +
+  geom_col() +
+  geom_text(aes(label = scales::percent(rate, accuracy=0.1)), vjust = -0.5) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_gradient(low = "#CADCFC", high = "#1E2761") +
+  labs(title = "Subscription Rate by Number of Campaign Contacts",
+       subtitle = "More contacts = lower conversion; stop after 3 attempts",
+       x = "Contacts This Campaign", y = "Conversion Rate") +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+
+> The more times we contact a customer in the same campaign, the less likely they are to subscribe. After 3 attempts, the conversion rate drops below 3%. **Agents should limit follow-ups to 3 calls per campaign.**
+
+### Age Distribution by Subscription Outcome
+```{r eda-age, fig.height=4}
+# Age distribution by outcome
+data_nova %>%
+  ggplot(aes(x = age, fill = y)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.65) +
+  scale_fill_manual(values = c("No" = "#CADCFC", "Yes" = "#1E2761"),
+                    name = "Subscribed") +
+  labs(title = "Age Distribution by Subscription Outcome",
+       x = "Age", y = "Count") +
+  theme_classic()
+```
+> The age distribution shows that subscribers tend to be older, with a peak around 37-47 years old. Younger customers (20-30) are less likely to subscribe. **Age is a useful predictor, but not as strong as job type or previous subscription history.**
+
+---
+
+# **<span style="color: #2C6D26;">Part Three: Building the Models and Evaluation</span> **  
+
+## 3.1 Train/Test Split
+
+Think of a model as a scoring system: it looks at everything we know about a customer and assigns them a probability of subscribing. We tried two approaches.
+
+We split our 45,211 customers into two groups: 75% to *train* the model (teach it patterns) and 25% to *test* it (check if it works on new data it has not seen before).
+
+```{r split}
+set.seed(123)
+train_idx <- createDataPartition(data_nova$y, p = 0.75, list = FALSE)
+train_df  <- data_nova[train_idx, ]
+test_df   <- data_nova[-train_idx, ]
+```
+
+## 3.2 Model 1: Logistic Regression (Baseline)
+
+A simple, interpretable model. Think of it as a weighted scorecard -- each factor (age, job, balance) gets a positive or negative score, and the total predicts subscription likelihood.
+
+```{r logistic}
+set.seed(123)
+lr_model <- glm(y ~ ., data = train_df, family = binomial(link = "logit"))
+lr_probs <- predict(lr_model, newdata = test_df, type = "response")
+lr_preds <- factor(ifelse(lr_probs >= 0.5, "Yes", "No"), levels = c("No","Yes"))
+
+# Confusion matrix at 0.5 threshold
+cm_lr <- confusionMatrix(lr_preds, test_df$y, positive = "Yes")
+roc_lr   <- roc(test_df$y, lr_probs, levels = c("No", "Yes"), direction = "<")
+cat("Logistic Regression AUC:", round(auc(roc_lr), 3))
+```
+
+## 3.3 Model 2: Random Forest (Improved)
+
+Imagine asking 300 different analysts to each study the data and vote on who will subscribe. Random Forest works similarly -- it builds 300 small decision trees and combines their votes. It is better at spotting complex patterns.
+
+```{r random-forest}
+set.seed(123)
+rf_model <- randomForest(
+  y ~ .,
+  data       = train_df,
+  ntree      = 300,
+  mtry       = 4,
+  importance = TRUE,
+  classwt    = c("No" = 1, "Yes" = 4)
+)
+
+# Predict on test set
+rf_probs <- predict(rf_model, newdata = test_df, type = "prob")[,"Yes"]
+rf_preds <- factor(ifelse(rf_probs >= 0.35, "Yes", "No"), levels = c("No","Yes"))
+
+cm_rf <- confusionMatrix(rf_preds, test_df$y, positive = "Yes")
+cat("=== Random Forest @ 0.35 threshold ===\n")
+print(cm_rf$byClass[c("Precision","Recall","F1")])
+roc_rf   <- roc(test_df$y, rf_probs, levels = c("No", "Yes"), direction = "<")
+cat("Random Forest AUC:", round(auc(roc_rf), 3))
+```
+
+
+## 3.4  Model Evaluation
+
+### 3.4.1 Area Under the Curve (AUC)
+
+```{r comparison}
+top20_n <- round(nrow(test_df) * 0.20)
+
+precision_at_20 <- function(probs, actuals, top_n) {
+  top_idx <- order(probs, decreasing = TRUE)[1:top_n]
+  mean(actuals[top_idx] == "Yes")
+}
+
+p20_lr <- precision_at_20(lr_probs, test_df$y, top20_n)
+p20_rf <- precision_at_20(rf_probs, test_df$y, top20_n)
+
+tribble(
+  ~Model,                ~AUC,                  ~`Precision in Top 20%`,
+  "Logistic Regression", round(auc(roc_lr), 3), round(p20_lr, 3),
+  "Random Forest",       round(auc(roc_rf), 3), round(p20_rf, 3)
+)
+```
+
+> **From this table:** AUC measures how well the model separates subscribers from non-subscribers -- closer to 1.0 is better (0.5 = random guessing, no better than a coin flip). **Precision in Top 20%** tells us: of the customers we flag as top priority, how many actually subscribe? Higher = fewer wasted calls.
+
+### 3.4.2 Receiver Operating Characteristics (ROC) Curves
+
+```{r roc-plot}
+plot(roc_lr, col = "#CADCFC", lwd = 2,
+     main = "ROC Curves: How Well Does Each Model Rank Customers?")
+plot(roc_rf, col = "#1E2761", lwd = 2, add = TRUE)
+legend("bottomright",
+       legend = c(paste0("Logistic Reg. AUC = ", round(auc(roc_lr), 3)),
+                  paste0("Random Forest AUC = ", round(auc(roc_rf), 3))),
+       col = c("#CADCFC", "#1E2761"), lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+```
+
+> The curved lines show how well each model identifies real subscribers. The grey dashed diagonal line represents pure chance -- a coin flip. A curve that bends toward the top-left corner is better. The dark blue line (Random Forest) sits higher, meaning it performs better.
+
+> **Random Forest wins.** It is better at identifying the right customers to call.
+
+---
+
+# **<span style="color: #2C6D26;"> Part Four: Decision Framework</span> ** 
+
+## 4.1 Choosing a Threshold
+
+The model gives every customer a score between 0 and 1 (e.g. 0.72 = 72% chance of subscribing). We need to decide: **at what score do we start calling people?** That cut-off is the threshold.
+
+- **Lower threshold** (e.g. 0.20) -- call more people -- catch more subscribers but also more wasted calls
+- **Higher threshold** (e.g. 0.70) -- call fewer people -- very targeted but might miss some real subscribers
+
+```{r threshold}
+thresholds <- seq(0.05, 0.95, by = 0.01)
+
+pr_data <- map_dfr(thresholds, function(t) {
+  preds <- factor(ifelse(rf_probs >= t, "Yes", "No"), levels = c("No", "Yes"))
+  cm    <- confusionMatrix(preds, test_df$y, positive = "Yes")
+  tibble(
+    threshold = t,
+    precision = ifelse(is.na(cm$byClass["Precision"]), 0, cm$byClass["Precision"]),
+    recall    = cm$byClass["Recall"],
+    f1        = ifelse(is.na(cm$byClass["F1"]), 0, cm$byClass["F1"])
+  )
+})
+
+ggplot(pr_data, aes(x = threshold)) +
+  geom_line(aes(y = precision, color = "Precision"), linewidth = 1) +
+  geom_line(aes(y = recall,    color = "Recall"),    linewidth = 1) +
+  geom_line(aes(y = f1,        color = "F1 Score"),  linewidth = 1, linetype = "dashed") +
+  geom_vline(xintercept = 0.35, linetype = "dotted", color = "gray40") +
+  annotate("text", x = 0.39, y = 0.85, label = "Chosen\nthreshold\n(0.35)", size = 3) +
+  scale_color_manual(values = c("Precision" = "#1E2761", "Recall" = "#E74C3C",
+                                "F1 Score"  = "#F39C12")) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(title = "Finding the Right Threshold",
+       subtitle = "Precision = quality of calls | Recall = how many real subscribers we catch",
+       x = "Threshold (minimum score needed to trigger a call)", y = "Score", color = NULL) +
+  theme_classic()
+```
+
+>As we raise the threshold (move right), we become more selective -- call quality improves (Precision rises, dark blue) but we start missing real subscribers (Recall drops, red). The dotted vertical line shows our chosen threshold of **0.35** -- a practical balance. The dashed yellow line (F1) combines both into a single score and peaks around our chosen point.
+
+We chose **0.35** -- a balance between catching enough subscribers and not wasting too many calls.
+
+
+## 4.2 Cost-Benefit Analysis
+
+```{r cost-benefit}
+cost_per_call   <- 15   # EUR per call
+revenue_per_sub <- 200  # EUR per new subscriber
+
+rf_preds_35 <- factor(ifelse(rf_probs >= 0.35, "Yes", "No"), levels = c("No", "Yes"))
+cm <- confusionMatrix(rf_preds_35, test_df$y, positive = "Yes")
+
+TP <- cm$table["Yes", "Yes"]
+FP <- cm$table["Yes", "No"]
+FN <- cm$table["No", "Yes"]
+TN <- cm$table["No", "No"]
+
+tribble(
+  ~Strategy,           ~`Total Calls`,           ~`Subscribers Reached`, ~`Net Profit (EUR)`,
+  "Call Everyone",     nrow(test_df),             TP + FN,                (TP+FN)*revenue_per_sub - nrow(test_df)*cost_per_call,
+  "Random 30%",        round(nrow(test_df)*0.30), round((TP+FN)*0.30),    round((TP+FN)*0.30)*revenue_per_sub - round(nrow(test_df)*0.30)*cost_per_call,
+  "Model (RF @ 0.35)", TP + FP,                  TP,                     TP*revenue_per_sub - (TP+FP)*cost_per_call
+)
+```
+
+>We compare three approaches side by side. "Call Everyone" is expensive and wasteful. "Random 30%" is cheaper but still hits mostly the wrong people. The **model-driven approach** makes far fewer calls while still capturing real subscribers -- leading to a much higher return on investment. Assumptions: each call costs 15 EUR; each new subscriber brings in 200 EUR.
+
+---
+
+# **<span style="color: #2C6D26;"> Part Five: Quality Check</span> ** 
+
+Before trusting a model with real decisions, we need to ask: *Is it actually reliable?* This section checks the model from three angles. 
+
+## 5.1 Is the Model's Confidence Accurate?
+
+A well-calibrated model is honest: when it says "this customer has a 70% chance of subscribing," roughly 70 out of 100 of those customers should actually subscribe. The chart below checks this.
+
+```{r calibration, fig.height=5}
+cal_data <- tibble(prob = rf_probs, actual = test_df$y == "Yes") %>%
+  mutate(bin = cut(prob, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)) %>%
+  group_by(bin) %>%
+  summarise(mean_pred = mean(prob), mean_actual = mean(actual), n = n()) %>%
+  filter(!is.na(bin))
+
+ggplot(cal_data, aes(x = mean_pred, y = mean_actual)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray60") +
+  geom_point(aes(size = n), color = "#1E2761") +
+  geom_line(color = "#1E2761") +
+  scale_size(range = c(2, 8), name = "No. of customers\nin this group") +
+  scale_x_continuous(labels = percent, limits = c(0, 1)) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(title = "Is the Model Honest About Its Confidence?",
+       subtitle = "Dots near the dashed line = predictions closely match reality",
+       x = "What the model predicted (%)", y = "What actually happened (%)") +
+  theme_classic()
+```
+
+>The dashed diagonal line is the "perfectly honest" benchmark. Each dot represents a group of customers with similar predicted scores -- larger dots mean more customers in that group. Dots close to the dashed line mean the model's confidence levels are trustworthy. Dots above the line mean the model is underestimating real subscription rates; dots below mean it is overestimating. A close fit means we can trust the scores.
+
+## 5.2 Where Does the Model Make Mistakes?
+
+All models make two types of errors:
+
+- **False Positive (FP):** We call a customer who does not subscribe -- wasted call (costs 15 EUR)
+- **False Negative (FN):** We skip a customer who would have subscribed -- missed revenue (costs 200 EUR)
+
+```{r confusion-matrix}
+as.data.frame(cm$table) %>%
+  rename(Predicted = Prediction, Actual = Reference, Count = Freq) %>%
+  mutate(
+    Result = case_when(
+      Predicted == "Yes" & Actual == "Yes" ~ "[OK] Correctly called - subscribed",
+      Predicted == "No"  & Actual == "No"  ~ "[OK] Correctly skipped - no interest",
+      Predicted == "Yes" & Actual == "No"  ~ "[!]  Wasted call - did not subscribe",
+      Predicted == "No"  & Actual == "Yes" ~ "[X]  Missed subscriber - not called"
+    )
+  ) %>%
+  select(Result, Count) %>%
+  arrange(desc(Count))
+```
+
+>This shows what happened when we applied the model to our 11,302 test customers. The vast majority were correctly identified and skipped (saving thousands of calls). The wasted calls [!] are an acceptable trade-off -- far fewer than calling everyone. The missed subscribers [X] are the real cost, but at our chosen threshold we keep this manageable.
+
+## 5.3 What are the Biggest Risks Going Forward?
+
+No model is perfect. Here are three things to actively monitor after deployment:
+
+| Risk                  | What it means in plain English                                                  | What to do                                                   |
+|-----------------------|---------------------------------------------------------------------------------|--------------------------------------------------------------|
+| Model drift           | Customer behaviour changes over time, making predictions less accurate          | Re-run the model every quarter with fresh data               |
+| Fairness              | The model might unintentionally score certain groups lower (e.g. by age or job) | Review results across customer segments before each campaign |
+| Wrong cost assumptions| The call cost or revenue estimate might shift                                   | Update these numbers each campaign and re-check the table    |
+
+---
+
+# **<span style="color: #2C6D26;"> Recommendations</span> ** 
+
+Use the **Random Forest model with a threshold of 0.35** to score customers before each campaign.
+
+**Simple calling rules:**
+
+| Score       | Action                              |
+|-------------|-------------------------------------|
+| 0.60+       | Call immediately -- top priority    |
+| 0.35 - 0.59 | Standard call -- max 2 attempts     |
+| Below 0.35  | Skip -- email only                  |
+| 3+ calls, no conversion | Remove from active list |
+
+> **Why these rules?** The score reflects the model's estimated probability that a customer will subscribe. A score of 0.60 means a 60% chance -- well above the 10% average, so agents should prioritise these. Scores below 0.35 are barely above the baseline rate and not worth a phone call.
+
+**Pilot plan:** Test in one region for one campaign cycle (8 weeks). Compare subscription rate vs. a random control group. If uplift is 1.5x or higher, roll out fully.
+
+---
+
+*Dataset: UCI Bank Marketing (Moro et al., 2014). Analysis done in R. AI tools (Claude, Anthropic) were used for generating idea*
