@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>NovaBank Predictive Retention Framework </title>
+    <meta charset="utf-8" />
+    <meta name="author" content="Daniella Ojekere   Arnaud Safari  Mascot Ndlovu " />
+    <script src="images/header-attrs-2.30/header-attrs.js"></script>
+    <link href="images/remark-css-0.0.1/default.css" rel="stylesheet" />
+    <link href="images/remark-css-0.0.1/robot-fonts.css" rel="stylesheet" />
+    <link href="images/remark-css-0.0.1/rladies.css" rel="stylesheet" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+.title[
+# <b>NovaBank Predictive Retention Framework</b></font><br>
+]
+.subtitle[
+## <font color = blue><b>Analytics Methods and Frameworks</b></font>
+]
+.author[
+### <font color = pink><b>Daniella Ojekere <br> Arnaud Safari <br>Mascot Ndlovu</b></font><br>
+]
+.institute[
+### <font color = #ff6600><b>Quantic School of Business and Technology</b></font><br>
+]
+
+---
+
+
+layout: true
+
+
+
+---
+
+### **&lt;span style="color: #2C6D26;"&gt;Problem Framing &amp; Scope&lt;/span&gt; ** 
+
+NovaBank runs phone campaigns to sell term deposits. The issue? Despite significant outreach effort, the **subscription rate is under 12%**, which implies that **Over 88% of calls lead to nothing** -- wasted agent time and budget.
+
+#### Success Measures
+
+We select **two primary metrics**:
+
+1. **Precision@Top20%** — Of the customers we flag as high-priority, what fraction actually subscribes? This directly measures targeting efficiency.  
+2. **AUC-ROC** — Overall discrimination ability of the model across all thresholds.
+
+
+&gt;The goal of this project is simple: **predict which customers are likely to subscribe before we call them**, so agents focus only on the best leads.
+
+---
+
+###**&lt;span style="color: #2C6D26;"&gt;Data Preparation&lt;/span&gt; ** 
+
+
+We use the UCI Bank Marketing dataset -- 45,211 customer records with 17 variables.
+
+
+
+
+``` r
+# How many subscribed?
+data %&gt;%
+  count(y) %&gt;%
+  mutate(pct = round(n / sum(n) * 100, 1)) %&gt;%
+  rename(Subscribed = y, Count = n, `Percent (%)` = pct)
+```
+
+```
+##   Subscribed Count Percent (%)
+## 1         no 40659        89.9
+## 2        yes  4552        10.1
+```
+
+&gt; **From this table:** "No" = did not subscribe, "Yes" = subscribed. Only 1 in 10 customers said yes -- which is why a smarter targeting strategy is a must needed factor for the business.
+
+---
+###**&lt;span style="color: #2C6D26;"&gt;Data Cleaning &amp; Exploration&lt;/span&gt; ** 
+
+Basic Cleaning done then we explore.
+
+
+**Age Distribution by Subscription Outcome**
+
+![](Analytics-slide_files/figure-html/unnamed-chunk-3-1.png)&lt;!-- --&gt;
+
+&gt; The age distribution shows that subscribers tend to be older, with a peak around 37-47 years old. Younger customers (20-30) are less likely to subscribe. **Age is a useful predictor** of subscription outcome.
+---
+
+### **&lt;span style="color: #2C6D26;"&gt;Building the Models and Evaluation&lt;/span&gt; **  
+
+**Start by spliting dataset into training(75%) and testing(25%) dataset**
+
+
+
+
+**Model using:**
+1. Logistic Regression (Baseline)
+
+
+
+
+
+2. Random Forest (Improved)
+
+
+
+
+**Model Evaluation**
+
+
+
+
+```
+## # A tibble: 2 × 3
+##   Model                 AUC `Precision in Top 20%`
+##   &lt;chr&gt;               &lt;dbl&gt;                  &lt;dbl&gt;
+## 1 Logistic Regression 0.583                  0.153
+## 2 Random Forest       0.562                  0.135
+```
+
+&gt; **From this table:** AUC measures how well the model separates subscribers from non-subscribers -- closer to 1.0 is better (0.5 = random guessing, no better than a coin flip). **Precision in Top 20%** tells us: of the customers we flag as top priority, how many actually subscribe? Higher = fewer wasted calls.
+---
+### **&lt;span style="color: #2C6D26;"&gt;Receiver Operating Characteristics (ROC) Curves&lt;/span&gt; ** 
+
+.pull-left[
+
+![](Analytics-slide_files/figure-html/unnamed-chunk-8-1.png)&lt;!-- --&gt;
+]
+
+.pull-right[
+&gt; The ROC curves illustrate how well each model ranks customers by their likelihood of subscribing. In this analysis, Logistic Regression achieves a slightly higher AUC (0.583) compared to Random Forest (0.562), indicating marginally better ability to distinguish between subscribers and non-subscribers. 
+]
+
+&gt; **Random Forest wins.** It is better at identifying the right customers to call.
+
+---
+
+### **&lt;span style="color: #2C6D26;"&gt; Decision Framework&lt;/span&gt; ** 
+
+**Choose a Threshold**
+- **Lower threshold** (e.g. 0.20) -- call more people -- catch more subscribers but also more wasted calls
+- **Higher threshold** (e.g. 0.70) -- call fewer people -- very targeted but might miss some real subscribers
+
+
+
+![](Analytics-slide_files/figure-html/unnamed-chunk-10-1.png)&lt;!-- --&gt;
+
+&gt;As we raise the threshold (move right), we become more selective -- call quality improves (Precision rises, dark blue) but we start missing real subscribers (Recall drops, red). The dotted vertical line shows our chosen threshold of **0.35** -- a practical balance. The dashed yellow line (F1) combines both into a single score and peaks around our chosen point.
+
+We chose **0.35** -- a balance between catching enough subscribers and not wasting too many calls.
+
+---
+### **&lt;span style="color: #2C6D26;"&gt; Cost-Benefit Analysis&lt;/span&gt; **
+
+
+```
+## # A tibble: 3 × 4
+##   Strategy          `Total Calls` `Subscribers Reached` `Net Profit (EUR)`
+##   &lt;chr&gt;                     &lt;dbl&gt;                 &lt;dbl&gt;              &lt;dbl&gt;
+## 1 Call Everyone             11302                  1138              58070
+## 2 Random 30%                 3391                   341              17335
+## 3 Model (RF @ 0.35)           113                    32               4705
+```
+
+&gt;We compare three approaches side by side. "Call Everyone" is expensive and wasteful. "Random 30%" is cheaper but still hits mostly the wrong people. The **model-driven approach** makes far fewer calls while still capturing real subscribers -- leading to a much higher return on investment. Assumptions: each call costs 15 EUR; each new subscriber brings in 200 EUR.
+
+---
+
+### **&lt;span style="color: #2C6D26;"&gt; Quality Check&lt;/span&gt; ** 
+
+Before trusting a model with real decisions, we need to ask: *Is it actually reliable?* 
+
+**Is the Model's Confidence Accurate**
+
+A well-calibrated model is honest: when it says "this customer has a 70% chance of subscribing," roughly 70 out of 100 of those customers should actually subscribe. The chart below checks this.
+
+![](Analytics-slide_files/figure-html/unnamed-chunk-12-1.png)&lt;!-- --&gt;
+
+
+**Where Does the Model Make Mistakes?**
+
+All models make two types of errors:
+
+- **False Positive (FP):** We call a customer who does not subscribe -- wasted call (costs 15 EUR)
+- **False Negative (FN):** We skip a customer who would have subscribed -- missed revenue (costs 200 EUR)
+
+
+```
+##                                 Result Count
+## 1 [OK] Correctly skipped - no interest 10083
+## 2  [X]  Missed subscriber - not called  1106
+## 3 [!]  Wasted call - did not subscribe    81
+## 4   [OK] Correctly called - subscribed    32
+```
+
+&gt;This shows what happened when we applied the model to our 11,302 test customers. The vast majority were correctly identified and skipped (saving thousands of calls). The wasted calls [!] are an acceptable trade-off -- far fewer than calling everyone. The missed subscribers [X] are the real cost, but at our chosen threshold we keep this manageable.
+---
+
+
+# **&lt;span style="color: #2C6D26;"&gt; Recommendations&lt;/span&gt; ** 
+
+Use the **Random Forest model with a threshold of 0.35** to score customers before each campaign.
+
+**Simple calling rules:**
+
+| Score       | Action                              |
+|-------------|-------------------------------------|
+| 0.60+       | Call immediately -- top priority    |
+| 0.35 - 0.59 | Standard call -- max 2 attempts     |
+| Below 0.35  | Skip -- email only                  |
+| 3+ calls, no conversion | Remove from active list |
+
+&gt; **Why these rules?** The score reflects the model's estimated probability that a customer will subscribe. A score of 0.60 means a 60% chance -- well above the 10% average, so agents should prioritise these. Scores below 0.35 are barely above the baseline rate and not worth a phone call.
+
+**Pilot plan:** Test in one region for one campaign cycle (8 weeks). Compare subscription rate vs. a random control group. If uplift is 1.5x or higher, roll out fully.
+
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+  "highlightStyle": "github",
+  "highlightLines": true,
+  "countIncrementalSlides": false
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+// add `data-at-shortcutkeys` attribute to <body> to resolve conflicts with JAWS
+// screen reader (see PR #262)
+(function(d) {
+  let res = {};
+  d.querySelectorAll('.remark-help-content table tr').forEach(tr => {
+    const t = tr.querySelector('td:nth-child(2)').innerText;
+    tr.querySelectorAll('td:first-child .key').forEach(key => {
+      const k = key.innerText;
+      if (/^[a-z]$/.test(k)) res[k] = t;  // must be a single letter (key)
+    });
+  });
+  d.body.setAttribute('data-at-shortcutkeys', JSON.stringify(res));
+})(document);
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();
+// adds .remark-code-has-line-highlighted class to <pre> parent elements
+// of code chunks containing highlighted lines with class .remark-code-line-highlighted
+(function(d) {
+  const hlines = d.querySelectorAll('.remark-code-line-highlighted');
+  const preParents = [];
+  const findPreParent = function(line, p = 0) {
+    if (p > 1) return null; // traverse up no further than grandparent
+    const el = line.parentElement;
+    return el.tagName === "PRE" ? el : findPreParent(el, ++p);
+  };
+
+  for (let line of hlines) {
+    let pre = findPreParent(line);
+    if (pre && !preParents.includes(pre)) preParents.push(pre);
+  }
+  preParents.forEach(p => p.classList.add("remark-code-has-line-highlighted"));
+})(document);</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>
