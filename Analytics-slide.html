@@ -62,9 +62,9 @@ We use the UCI Bank Marketing dataset -- 45,211 customer records with 17 variabl
 ``` r
 # How many subscribed?
 data %&gt;%
-  count(y) %&gt;%
-  mutate(pct = round(n / sum(n) * 100, 1)) %&gt;%
-  rename(Subscribed = y, Count = n, `Percent (%)` = pct)
+    count(y) %&gt;%
+    mutate(pct = round(n/sum(n) * 100, 1)) %&gt;%
+    rename(Subscribed = y, Count = n, `Percent (%)` = pct)
 ```
 
 ```
@@ -216,6 +216,8 @@ Use the **Random Forest model with a threshold of 0.35** to score customers befo
 
 **Pilot plan:** Test in one region for one campaign cycle (8 weeks). Compare subscription rate vs. a random control group. If uplift is 1.5x or higher, roll out fully.
 
+
+*Dataset: UCI Bank Marketing (Moro et al., 2014). Analysis done in R. AI tools (Claude, Anthropic) were used for generating idea*
     </textarea>
 <style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
 <script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
